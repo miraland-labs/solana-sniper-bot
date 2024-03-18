@@ -46,7 +46,7 @@ const transport = pino.transport({
     // },
 
     {
-      level: 'info',
+      level: 'info', //info,debug,trace
       target: 'pino-pretty',
       options: {},
     },
@@ -55,7 +55,7 @@ const transport = pino.transport({
 
 export const logger = pino(
   {
-    level: 'info',
+    level: 'info', // info,debug,trace
     redact: ['poolKeys'],
     serializers: {
       error: pino.stdSerializers.err,
@@ -94,9 +94,24 @@ const CHECK_IF_MINT_IS_RENOUNCED = retrieveEnvVariable('CHECK_IF_MINT_IS_RENOUNC
 const USE_SNIPE_LIST = retrieveEnvVariable('USE_SNIPE_LIST', logger) === 'true';
 const SNIPE_LIST_REFRESH_INTERVAL = Number(retrieveEnvVariable('SNIPE_LIST_REFRESH_INTERVAL', logger));
 const AUTO_SELL = retrieveEnvVariable('AUTO_SELL', logger) === 'true';
+const MIN_SOL_OF_LP = Number(retrieveEnvVariable('MIN_SOL_OF_LP', logger));
+const SELL_AFTER = Number(retrieveEnvVariable('SELL_AFTER', logger));
+// const RETRY_AFTER = Number(retrieveEnvVariable('RETRY_AFTER', logger));
+// const MAX_TOKENS_TO_BUY = Number(retrieveEnvVariable('MAX_TOKENS_TO_BUY', logger));
+
 const MAX_SELL_RETRIES = Number(retrieveEnvVariable('MAX_SELL_RETRIES', logger));
+const MAX_BUYING_LIMIT = Number(retrieveEnvVariable('MAX_BUYING_LIMIT', logger));
+const CHECK_POOL_QUALITY = retrieveEnvVariable('CHECK_POOL_QUALITY', logger) === 'true';
 
 let snipeList: string[] = [];
+
+// MI
+let buyingNum: number = 0;
+let boughtNum: number = 0;
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
 
 async function init(): Promise<void> {
   // get wallet
@@ -179,9 +194,38 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     const mintOption = await checkMintable(poolState.baseMint);
 
     if (mintOption !== true) {
-      logger.warn({ mint: poolState.baseMint }, 'Skipping, owner can mint tokens!');
+      logger.warn({ mint: poolState.baseMint }, 'Skipping, owner can mint/mutate tokens!');
       return;
     }
+  }
+
+  // MI
+  // logger.info(
+  //   {
+  //     baseMint: poolState.baseMint,
+  //     baseDecimal: poolState.baseDecimal,
+  //     baseVault: poolState.baseVault,
+  //     quoteMint: poolState.quoteMint,
+  //     quoteDecimal: poolState.quoteDecimal,
+  //     quoteVault: poolState.quoteVault,
+  //   },
+  //   `Pool State`
+  // );
+
+  if (CHECK_POOL_QUALITY) {
+    const qvault: number = await solanaConnection.getBalance(poolState.quoteVault);
+    const solAmount: number = qvault / Math.pow(10, 9);
+    if (solAmount < MIN_SOL_OF_LP) {
+      // Pool sol balance is too small to meet minimum requirement
+      return;
+    } else {
+      logger.info(`Pool sol balance: ${solAmount}SOL`);
+    }
+  }
+
+  if (buyingNum >= MAX_BUYING_LIMIT) {
+    logger.warn(`No more buying, max limit reached: ${MAX_BUYING_LIMIT}`);
+    return;
   }
 
   await buy(id, poolState);
@@ -195,6 +239,9 @@ export async function checkMintable(vault: PublicKey): Promise<boolean | undefin
     }
     const deserialize = MintLayout.decode(data);
     return deserialize.mintAuthorityOption === 0;
+          //  && deserialize.freezeAuthorityOption === 0
+          //  && !deserialize.mintAuthority
+          //  && !deserialize.freezeAuthority;
   } catch (e) {
     logger.debug(e);
     logger.error({ mint: vault }, `Failed to check if mint is renounced`);
@@ -250,8 +297,8 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       payerKey: wallet.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: [
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 421197 }),
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 101337 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 821197 }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 151337 }),
         createAssociatedTokenAccountIdempotentInstruction(
           wallet.publicKey,
           tokenAccount.address,
@@ -267,6 +314,7 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       preflightCommitment: commitment,
     });
     logger.info({ mint: accountData.baseMint, signature }, `Sent buy tx`);
+    buyingNum++; //MI
     const confirmation = await solanaConnection.confirmTransaction(
       {
         signature,
@@ -276,11 +324,13 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       commitment,
     );
     if (!confirmation.value.err) {
+      boughtNum++; // MI
       logger.info(
         {
           mint: accountData.baseMint,
           signature,
           url: `https://solscan.io/tx/${signature}?cluster=${network}`,
+          dex: `https://dexscreener.com/solana/${accountData.baseMint}`,
         },
         `Confirmed buy tx`,
       );
@@ -342,8 +392,8 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish)
         payerKey: wallet.publicKey,
         recentBlockhash: latestBlockhash.blockhash,
         instructions: [
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 421197 }),
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 101337 }),
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 821197 }),
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 151337 }),
           ...innerTransaction.instructions,
           createCloseAccountInstruction(tokenAccount.address, wallet.publicKey, wallet.publicKey),
         ],
@@ -474,6 +524,9 @@ const runListener = async () => {
           return;
         }
 
+        // MI, begin selling after 10 secs
+        // await delay(10000);
+        await new Promise((resolve) => setTimeout(resolve, SELL_AFTER));
         const _ = sell(updatedAccountInfo.accountId, accountData.mint, accountData.amount);
       },
       commitment,
