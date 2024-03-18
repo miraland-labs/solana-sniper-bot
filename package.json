@@ -1,6 +1,15 @@
 {
   "name": "solana-sniper-bot",
+  "version": "0.5.0",
+  "description": "Solarti release of solana-sniper-bot",
   "author": "Filip Dundjer",
+  "contributors": [
+    {
+      "name": "Miraland Crafters",
+      "email": "crafters@miraland.top",
+      "url": "https://miraland.top/"
+    }
+  ],
   "scripts": {
     "buy": "ts-node buy.ts"
   },
